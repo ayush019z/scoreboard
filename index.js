@@ -15,16 +15,12 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const CRICAPI_KEY = process.env.CRICAPI_KEY;
 
-// Default: update every 15 minutes.
-// Change UPDATE_INTERVAL_MS in Railway if your API quota allows faster updates.
-const UPDATE_INTERVAL_MS = Math.max(
-  60_000,
-  Number(process.env.UPDATE_INTERVAL_MS || 900_000)
-);
+// 2 minutes
+const UPDATE_INTERVAL_MS = 120000;
 
 if (!TOKEN || !CLIENT_ID || !CRICAPI_KEY) {
   console.error(
-    "Missing environment variables. Required: DISCORD_TOKEN, CLIENT_ID, CRICAPI_KEY"
+    "Missing DISCORD_TOKEN, CLIENT_ID or CRICAPI_KEY"
   );
   process.exit(1);
 }
@@ -33,237 +29,248 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds],
 });
 
-// Active live scoreboards
-// Key = Discord scoreboard message ID
 const activeScoreboards = new Map();
 
-function shorten(text, max = 100) {
-  const value = String(text || "");
+// =========================
+// API
+// =========================
 
-  return value.length > max
-    ? `${value.slice(0, max - 1)}…`
-    : value;
-}
-
-function matchTitle(match) {
-  return (
-    match.name ||
-    [match.t1, match.t2].filter(Boolean).join(" vs ") ||
-    "Cricket Match"
-  );
-}
-
-function isLive(match) {
-  const ms = String(match.ms || "").toLowerCase();
-  const status = String(match.status || "").toLowerCase();
-
-  return (
-    ms === "live" ||
-    status.includes("live") ||
-    status.includes("in progress") ||
-    status.includes("innings break") ||
-    status.includes("rain")
-  );
-}
-
-// ==============================
-// CRICAPI
-// ==============================
-
-async function fetchCricScore() {
+async function fetchCurrentMatches() {
   const url = new URL(
-    "https://api.cricapi.com/v1/cricScore"
+    "https://api.cricapi.com/v1/currentMatches"
   );
 
-  url.searchParams.set(
-    "apikey",
-    CRICAPI_KEY
-  );
+  url.searchParams.set("apikey", CRICAPI_KEY);
+  url.searchParams.set("offset", "0");
 
   const response = await fetch(url);
 
   if (!response.ok) {
     throw new Error(
-      `CricAPI HTTP ${response.status}: ${response.statusText}`
+      `CricAPI HTTP ${response.status}`
     );
   }
 
-  const payload = await response.json();
+  const json = await response.json();
 
-  if (
-    payload.status &&
-    String(payload.status).toLowerCase() === "failure"
-  ) {
+  if (json.status === "failure") {
     throw new Error(
-      payload.reason || "CricAPI returned failure"
+      json.reason || "CricAPI request failed"
     );
   }
 
-  if (!Array.isArray(payload.data)) {
-    throw new Error(
-      "Unexpected CricAPI response: data is not an array."
-    );
-  }
-
-  return payload.data;
+  return Array.isArray(json.data)
+    ? json.data
+    : [];
 }
 
-async function getLiveMatches() {
-  const matches = await fetchCricScore();
+// =========================
+// HELPERS
+// =========================
 
-  return matches.filter(isLive);
-}
+function isLive(match) {
+  if (match.matchStarted && !match.matchEnded) {
+    return true;
+  }
 
-async function getMatchById(matchId) {
-  const matches = await fetchCricScore();
+  const status =
+    String(match.status || "").toLowerCase();
 
   return (
-    matches.find(
-      (match) =>
-        String(match.id) === String(matchId)
-    ) || null
+    status.includes("live") ||
+    status.includes("innings break") ||
+    status.includes("rain")
   );
 }
 
-// ==============================
-// SCOREBOARD EMBED
-// ==============================
-
-function scoreText(score) {
-  if (
-    score === undefined ||
-    score === null ||
-    score === ""
-  ) {
-    return "Yet to bat";
-  }
-
-  return String(score);
+function getLiveMatches(matches) {
+  return matches.filter(isLive);
 }
 
+function currentInnings(match) {
+  if (!Array.isArray(match.score)) {
+    return null;
+  }
+
+  if (!match.score.length) {
+    return null;
+  }
+
+  return match.score[
+    match.score.length - 1
+  ];
+}
+
+function currentOver(match) {
+  const innings =
+    currentInnings(match);
+
+  if (!innings) {
+    return null;
+  }
+
+  return innings.o ?? null;
+}
+
+function scoreSignature(match) {
+  if (!Array.isArray(match.score)) {
+    return "";
+  }
+
+  return JSON.stringify(
+    match.score.map((innings) => ({
+      r: innings.r,
+      w: innings.w,
+      o: innings.o,
+      inning: innings.inning,
+    }))
+  );
+}
+
+function shorten(text, max = 100) {
+  text = String(text || "");
+
+  if (text.length <= max) {
+    return text;
+  }
+
+  return text.slice(0, max - 1) + "…";
+}
+
+// =========================
+// SCORE FORMATTING
+// =========================
+
+function formatInnings(match) {
+  if (
+    !Array.isArray(match.score) ||
+    match.score.length === 0
+  ) {
+    return "Score not available yet.";
+  }
+
+  return match.score
+    .map((innings) => {
+      const name =
+        innings.inning ||
+        "Innings";
+
+      const runs =
+        innings.r ?? 0;
+
+      const wickets =
+        innings.w ?? 0;
+
+      const overs =
+        innings.o ?? 0;
+
+      return (
+        `**${name}**\n` +
+        `🏏 **${runs}/${wickets}**  •  ${overs} overs`
+      );
+    })
+    .join("\n\n");
+}
+
+// =========================
+// EMBED
+// =========================
+
 function buildScoreEmbed(match, stopped = false) {
-  const title = matchTitle(match);
-
-  const team1 =
-    match.t1 || "Team 1";
-
-  const team2 =
-    match.t2 || "Team 2";
+  const current =
+    currentInnings(match);
 
   const embed = new EmbedBuilder()
     .setTitle(
-      `🏏 ${shorten(title, 240)}`
+      `🏏 ${shorten(
+        match.name || "Live Cricket",
+        240
+      )}`
     )
 
-    .addFields(
-      {
-        name: shorten(team1, 256),
-        value: `**${scoreText(match.t1s)}**`,
-        inline: true,
-      },
-
-      {
-        name: shorten(team2, 256),
-        value: `**${scoreText(match.t2s)}**`,
-        inline: true,
-      },
-
-      {
-        name: "Status",
-        value: shorten(
-          match.status ||
-            match.ms ||
-            "Live",
-          1024
-        ),
-        inline: false,
-      }
+    .setDescription(
+      stopped
+        ? "⚪ **Updates stopped**"
+        : `🔴 **LIVE**\n${
+            match.status ||
+            "Match in progress"
+          }`
     )
 
-    .setFooter({
-      text: stopped
-        ? "Live updates stopped • CricAPI"
-        : `Auto-updating • every ${Math.round(
-            UPDATE_INTERVAL_MS / 60000
-          )} min • CricAPI`,
-    })
+    .addFields({
+      name: "📊 SCORECARD",
+      value: formatInnings(match),
+      inline: false,
+    });
 
-    .setTimestamp();
+  if (current) {
+    embed.addFields({
+      name: "🔥 Current Innings",
+      value:
+        `**${
+          current.inning ||
+          "Current innings"
+        }**\n` +
+        `### ${current.r ?? 0}/${
+          current.w ?? 0
+        }\n` +
+        `**${current.o ?? 0} overs**`,
+      inline: false,
+    });
+  }
 
   if (match.matchType) {
     embed.addFields({
       name: "Format",
-      value: String(
-        match.matchType
-      ).toUpperCase(),
+      value:
+        String(
+          match.matchType
+        ).toUpperCase(),
       inline: true,
     });
   }
 
-  if (match.series) {
+  if (match.venue) {
     embed.addFields({
-      name: "Series",
+      name: "Venue",
       value: shorten(
-        match.series,
+        match.venue,
         1024
       ),
       inline: true,
     });
   }
 
-  if (match.t1img) {
-    try {
-      embed.setThumbnail(
-        match.t1img
-      );
-    } catch {}
-  }
+  embed
+    .setFooter({
+      text: stopped
+        ? "Scoreboard stopped"
+        : "Over-by-over scoreboard • CricAPI",
+    })
+    .setTimestamp();
 
   return embed;
 }
 
-function buildStoppedEmbed(
-  match,
-  reason
-) {
-  const embed =
-    buildScoreEmbed(
-      match,
-      true
-    );
-
-  embed.addFields({
-    name: "Updater",
-    value: reason,
-    inline: false,
-  });
-
-  return embed;
-}
-
-// ==============================
-// SLASH COMMANDS
-// ==============================
+// =========================
+// COMMANDS
+// =========================
 
 const commands = [
   new SlashCommandBuilder()
     .setName("livesb")
     .setDescription(
-      "Choose a live cricket match and start a live scoreboard"
+      "Start a live cricket scoreboard"
     ),
 
   new SlashCommandBuilder()
     .setName("stopsb")
     .setDescription(
-      "Stop a live scoreboard in this channel"
+      "Stop a live scoreboard"
     ),
 ].map((command) =>
   command.toJSON()
 );
-
-// ==============================
-// REGISTER GLOBAL COMMANDS
-// ==============================
 
 async function registerCommands() {
   const rest =
@@ -281,76 +288,61 @@ async function registerCommands() {
   );
 
   console.log(
-    "✅ Registered global slash commands"
+    "✅ Global slash commands registered"
   );
 }
 
-// ==============================
+// =========================
 // /livesb
-// ==============================
+// =========================
 
-async function handleLiveScoreCommand(
-  interaction
-) {
+async function handleLiveSB(interaction) {
   await interaction.deferReply({
     ephemeral: true,
   });
 
   try {
     const matches =
-      await getLiveMatches();
+      await fetchCurrentMatches();
 
-    if (!matches.length) {
+    const liveMatches =
+      getLiveMatches(matches);
+
+    if (!liveMatches.length) {
       return interaction.editReply(
-        "🏏 No live matches were found by CricAPI right now."
+        "🏏 No live matches found."
       );
     }
 
-    // Discord menus support max 25 options
     const shown =
-      matches.slice(0, 25);
+      liveMatches.slice(0, 25);
 
     const menu =
       new StringSelectMenuBuilder()
         .setCustomId(
-          `livesb_select:${interaction.user.id}`
+          `livesb:${interaction.user.id}`
         )
-
         .setPlaceholder(
-          "Choose a live match"
+          "Select a live match"
         )
-
         .addOptions(
-          shown.map(
-            (match) => ({
-              label: shorten(
-                [
-                  match.t1,
-                  match.t2,
-                ]
-                  .filter(Boolean)
-                  .join(" vs ") ||
-                  matchTitle(
-                    match
-                  ),
-                100
-              ),
+          shown.map((match) => ({
+            label: shorten(
+              match.name ||
+              "Live match",
+              100
+            ),
 
-              description:
-                shorten(
-                  match.status ||
-                    match.series ||
-                    match.matchType ||
-                    "Live match",
-                  100
-                ),
+            description: shorten(
+              match.status ||
+              match.matchType ||
+              "Live",
+              100
+            ),
 
-              value:
-                String(
-                  match.id
-                ),
-            })
-          )
+            value:
+              String(match.id),
+          }))
         );
 
     const row =
@@ -359,42 +351,32 @@ async function handleLiveScoreCommand(
 
     await interaction.editReply({
       content:
-        matches.length > 25
-          ? `Found ${matches.length} live matches. Showing the first 25:`
-          : `Found ${matches.length} live match${
-              matches.length === 1
-                ? ""
-                : "es"
-            }:`,
+        `🏏 Found ${liveMatches.length} live match${
+          liveMatches.length === 1
+            ? ""
+            : "es"
+        }.`,
       components: [row],
     });
 
   } catch (error) {
-    console.error(
-      "/livesb error:",
-      error
-    );
+    console.error(error);
 
     await interaction.editReply(
-      `❌ Couldn't load live matches.\n\`${shorten(
-        error.message,
-        1500
-      )}\``
+      `❌ Error: ${error.message}`
     );
   }
 }
 
-// ==============================
-// MATCH SELECTED
-// ==============================
+// =========================
+// SELECT MATCH
+// =========================
 
-async function handleMatchSelection(
+async function handleMatchSelect(
   interaction
 ) {
   const [, ownerId] =
-    interaction.customId.split(
-      ":"
-    );
+    interaction.customId.split(":");
 
   if (
     interaction.user.id !==
@@ -402,47 +384,56 @@ async function handleMatchSelection(
   ) {
     return interaction.reply({
       content:
-        "Only the person who ran `/livesb` can use this menu.",
+        "Only the person who used `/livesb` can choose this match.",
       ephemeral: true,
     });
   }
 
   await interaction.deferUpdate();
 
-  const matchId =
-    interaction.values[0];
-
   try {
+    const matchId =
+      interaction.values[0];
+
+    const matches =
+      await fetchCurrentMatches();
+
     const match =
-      await getMatchById(
-        matchId
+      matches.find(
+        (m) =>
+          String(m.id) ===
+          String(matchId)
       );
 
     if (!match) {
       return interaction.editReply({
         content:
-          "❌ That match is no longer available from CricAPI.",
+          "❌ Match not found anymore.",
         components: [],
       });
     }
 
-    const scoreboardMessage =
+    const message =
       await interaction.channel.send({
         embeds: [
-          buildScoreEmbed(
-            match
-          ),
+          buildScoreEmbed(match),
         ],
       });
 
     activeScoreboards.set(
-      scoreboardMessage.id,
+      message.id,
       {
         channelId:
-          scoreboardMessage.channelId,
+          message.channelId,
 
         matchId:
           String(matchId),
+
+        lastScoreSignature:
+          scoreSignature(match),
+
+        lastOver:
+          currentOver(match),
 
         lastMatch:
           match,
@@ -451,187 +442,48 @@ async function handleMatchSelection(
 
     await interaction.editReply({
       content:
-        `✅ Live scoreboard started: ${scoreboardMessage.url}`,
-
+        `✅ Scoreboard started: ${message.url}`,
       components: [],
     });
 
   } catch (error) {
-    console.error(
-      "Selection error:",
-      error
-    );
+    console.error(error);
 
     await interaction.editReply({
       content:
-        `❌ Couldn't start scoreboard.\n\`${shorten(
-          error.message,
-          1500
-        )}\``,
-
+        `❌ Couldn't start scoreboard: ${error.message}`,
       components: [],
     });
   }
 }
 
-// ==============================
+// =========================
 // /stopsb
-// ==============================
+// =========================
 
-async function handleStopScoreboard(
+async function handleStopSB(
   interaction
 ) {
-  const inThisChannel =
-    [
-      ...activeScoreboards.entries(),
-    ].filter(
-      ([, data]) =>
-        data.channelId ===
-        interaction.channelId
-    );
-
-  if (
-    !inThisChannel.length
-  ) {
-    return interaction.reply({
-      content:
-        "There are no active scoreboards in this channel.",
-      ephemeral: true,
-    });
-  }
-
-  // Only one scoreboard
-  if (
-    inThisChannel.length === 1
-  ) {
-    const [
-      messageId,
-      data,
-    ] = inThisChannel[0];
-
-    activeScoreboards.delete(
-      messageId
-    );
-
-    try {
-      const message =
-        await interaction.channel.messages.fetch(
-          messageId
-        );
-
-      await message.edit({
-        embeds: [
-          buildStoppedEmbed(
-            data.lastMatch,
-            "Stopped manually with /stopsb."
-          ),
-        ],
-      });
-
-    } catch {}
-
-    return interaction.reply({
-      content:
-        "🛑 Live scoreboard stopped.",
-      ephemeral: true,
-    });
-  }
-
-  // Multiple scoreboards
-  const menu =
-    new StringSelectMenuBuilder()
-
-      .setCustomId(
-        `stopsb_select:${interaction.user.id}`
-      )
-
-      .setPlaceholder(
-        "Choose a scoreboard to stop"
-      )
-
-      .addOptions(
-        inThisChannel
-          .slice(0, 25)
-          .map(
-            ([
-              messageId,
-              data,
-            ]) => ({
-              label:
-                shorten(
-                  matchTitle(
-                    data.lastMatch
-                  ),
-                  100
-                ),
-
-              description:
-                shorten(
-                  data.lastMatch
-                    .status ||
-                    "Live scoreboard",
-                  100
-                ),
-
-              value:
-                messageId,
-            })
-          )
+  const boards =
+    [...activeScoreboards.entries()]
+      .filter(
+        ([, board]) =>
+          board.channelId ===
+          interaction.channelId
       );
 
-  return interaction.reply({
-    content:
-      "Choose the scoreboard you want to stop:",
-
-    components: [
-      new ActionRowBuilder()
-        .addComponents(
-          menu
-        ),
-    ],
-
-    ephemeral: true,
-  });
-}
-
-// ==============================
-// STOP MENU
-// ==============================
-
-async function handleStopSelection(
-  interaction
-) {
-  const [, ownerId] =
-    interaction.customId.split(
-      ":"
-    );
-
-  if (
-    interaction.user.id !==
-    ownerId
-  ) {
+  if (!boards.length) {
     return interaction.reply({
       content:
-        "Only the person who ran `/stopsb` can use this menu.",
+        "No active scoreboard in this channel.",
       ephemeral: true,
     });
   }
 
-  const messageId =
-    interaction.values[0];
-
-  const data =
-    activeScoreboards.get(
-      messageId
-    );
-
-  if (!data) {
-    return interaction.update({
-      content:
-        "That scoreboard is already stopped.",
-      components: [],
-    });
-  }
+  const [
+    messageId,
+    board,
+  ] = boards[0];
 
   activeScoreboards.delete(
     messageId
@@ -645,30 +497,28 @@ async function handleStopSelection(
 
     await message.edit({
       embeds: [
-        buildStoppedEmbed(
-          data.lastMatch,
-          "Stopped manually with /stopsb."
+        buildScoreEmbed(
+          board.lastMatch,
+          true
         ),
       ],
     });
-
   } catch {}
 
-  return interaction.update({
+  await interaction.reply({
     content:
-      "🛑 Live scoreboard stopped.",
-
-    components: [],
+      "🛑 Scoreboard stopped.",
+    ephemeral: true,
   });
 }
 
-// ==============================
-// AUTOMATIC REFRESH
-// ==============================
+// =========================
+// AUTO REFRESH
+// =========================
 
-async function refreshAllScoreboards() {
+async function refreshScoreboards() {
   if (
-    !activeScoreboards.size
+    activeScoreboards.size === 0
   ) {
     return;
   }
@@ -676,36 +526,65 @@ async function refreshAllScoreboards() {
   let matches;
 
   try {
-    // One API request refreshes every
-    // currently active scoreboard.
     matches =
-      await fetchCricScore();
+      await fetchCurrentMatches();
 
   } catch (error) {
     console.error(
-      "Scoreboard refresh API error:",
+      "Refresh API error:",
       error
     );
 
     return;
   }
 
-  const byId =
+  const matchMap =
     new Map(
-      matches.map(
-        (match) => [
-          String(match.id),
-          match,
-        ]
-      )
+      matches.map((match) => [
+        String(match.id),
+        match,
+      ])
     );
 
   for (
     const [
       messageId,
       board,
-    ] of activeScoreboards
+    ]
+    of activeScoreboards
   ) {
+    const match =
+      matchMap.get(
+        board.matchId
+      );
+
+    if (!match) {
+      continue;
+    }
+
+    const signature =
+      scoreSignature(match);
+
+    const over =
+      currentOver(match);
+
+    // Nothing changed
+    if (
+      signature ===
+      board.lastScoreSignature
+    ) {
+      continue;
+    }
+
+    board.lastScoreSignature =
+      signature;
+
+    board.lastOver =
+      over;
+
+    board.lastMatch =
+      match;
+
     try {
       const channel =
         await client.channels.fetch(
@@ -716,181 +595,86 @@ async function refreshAllScoreboards() {
         !channel ||
         !channel.isTextBased()
       ) {
-        activeScoreboards.delete(
-          messageId
-        );
-
         continue;
       }
 
       const message =
-        await channel.messages
-          .fetch(messageId)
-          .catch(
-            () => null
-          );
-
-      if (!message) {
-        activeScoreboards.delete(
+        await channel.messages.fetch(
           messageId
         );
 
-        continue;
-      }
-
-      const match =
-        byId.get(
-          board.matchId
-        );
-
-      if (!match) {
-        activeScoreboards.delete(
-          messageId
-        );
-
-        await message.edit({
-          embeds: [
-            buildStoppedEmbed(
-              board.lastMatch,
-              "Match disappeared from the CricAPI score feed."
-            ),
-          ],
-        });
-
-        continue;
-      }
-
-      board.lastMatch =
-        match;
+      await message.edit({
+        embeds: [
+          buildScoreEmbed(match),
+        ],
+      });
 
       // Match finished
       if (!isLive(match)) {
         activeScoreboards.delete(
           messageId
         );
-
-        await message.edit({
-          embeds: [
-            buildStoppedEmbed(
-              match,
-              "Match is no longer live. Automatic updates ended."
-            ),
-          ],
-        });
-
-        continue;
       }
-
-      // Update scoreboard
-      await message.edit({
-        embeds: [
-          buildScoreEmbed(
-            match
-          ),
-        ],
-      });
 
     } catch (error) {
       console.error(
-        `Refresh failed for message ${messageId}:`,
+        "Scoreboard edit error:",
         error
       );
     }
   }
 }
 
-// ==============================
+// =========================
 // INTERACTIONS
-// ==============================
+// =========================
 
 client.on(
   "interactionCreate",
   async (interaction) => {
-    try {
-      if (
-        interaction.isChatInputCommand()
-      ) {
-        if (
-          interaction.commandName ===
-          "livesb"
-        ) {
-          return handleLiveScoreCommand(
-            interaction
-          );
-        }
 
-        if (
-          interaction.commandName ===
-          "stopsb"
-        ) {
-          return handleStopScoreboard(
-            interaction
-          );
-        }
+    if (
+      interaction.isChatInputCommand()
+    ) {
+
+      if (
+        interaction.commandName ===
+        "livesb"
+      ) {
+        return handleLiveSB(
+          interaction
+        );
       }
 
       if (
-        interaction.isStringSelectMenu()
+        interaction.commandName ===
+        "stopsb"
       ) {
-        if (
-          interaction.customId.startsWith(
-            "livesb_select:"
-          )
-        ) {
-          return handleMatchSelection(
-            interaction
-          );
-        }
-
-        if (
-          interaction.customId.startsWith(
-            "stopsb_select:"
-          )
-        ) {
-          return handleStopSelection(
-            interaction
-          );
-        }
+        return handleStopSB(
+          interaction
+        );
       }
+    }
 
-    } catch (error) {
-      console.error(
-        "Interaction handler error:",
-        error
-      );
-
+    if (
+      interaction.isStringSelectMenu()
+    ) {
       if (
-        !interaction.isRepliable()
+        interaction.customId.startsWith(
+          "livesb:"
+        )
       ) {
-        return;
-      }
-
-      const payload = {
-        content:
-          "❌ Something went wrong while handling that interaction.",
-        ephemeral: true,
-      };
-
-      if (
-        interaction.deferred ||
-        interaction.replied
-      ) {
-        await interaction
-          .followUp(payload)
-          .catch(() => {});
-
-      } else {
-        await interaction
-          .reply(payload)
-          .catch(() => {});
+        return handleMatchSelect(
+          interaction
+        );
       }
     }
   }
 );
 
-// ==============================
-// BOT READY
-// ==============================
+// =========================
+// READY
+// =========================
 
 client.once(
   "clientReady",
@@ -900,22 +684,19 @@ client.once(
     );
 
     console.log(
-      `🔄 Scoreboard refresh: every ${Math.round(
-        UPDATE_INTERVAL_MS /
-          60000
-      )} minute(s)`
+      "🏏 Live scoreboard ready"
     );
 
     setInterval(
-      refreshAllScoreboards,
+      refreshScoreboards,
       UPDATE_INTERVAL_MS
     );
   }
 );
 
-// ==============================
-// START BOT
-// ==============================
+// =========================
+// START
+// =========================
 
 (async () => {
   try {
@@ -927,7 +708,7 @@ client.once(
 
   } catch (error) {
     console.error(
-      "Fatal startup error:",
+      "Startup error:",
       error
     );
 
