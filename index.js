@@ -287,7 +287,7 @@ function buildScoreEmbed(match, stopped = false) {
     .setFooter({
       text: stopped
         ? "Live updates ended"
-        : "🔄 Updates every 2 minutes • CricAPI",
+        : "🔄 Updates every minute • CricAPI",
     })
     .setTimestamp();
 
