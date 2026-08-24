@@ -177,75 +177,117 @@ function formatInnings(match) {
 // =========================
 
 function buildScoreEmbed(match, stopped = false) {
-  const current =
-    currentInnings(match);
+  const scores = Array.isArray(match.score)
+    ? match.score
+    : [];
+
+  const current = scores.length
+    ? scores[scores.length - 1]
+    : null;
+
+  // Team names
+  const teams = match.teams || [];
+
+  const team1 = teams[0] || "Team 1";
+  const team2 = teams[1] || "Team 2";
+
+  // Find score for each team
+  const team1Innings = scores.filter((s) =>
+    String(s.inning || "")
+      .toLowerCase()
+      .includes(team1.toLowerCase())
+  );
+
+  const team2Innings = scores.filter((s) =>
+    String(s.inning || "")
+      .toLowerCase()
+      .includes(team2.toLowerCase())
+  );
+
+  function formatTeamScore(team, inningsList) {
+    if (!inningsList.length) {
+      return `**${team}**\nYet to bat`;
+    }
+
+    return inningsList
+      .map((inn) => {
+        const score = `${inn.r ?? 0}/${inn.w ?? 0}`;
+        const overs = inn.o ?? 0;
+
+        return `**${team}**\n# ${score}\n${overs} overs`;
+      })
+      .join("\n");
+  }
+
+  const title =
+    match.name ||
+    `${team1} vs ${team2}`;
+
+  const description = [
+    stopped
+      ? "⚪ **SCOREBOARD STOPPED**"
+      : `🔴 **LIVE • ${
+          String(match.matchType || "CRICKET").toUpperCase()
+        }**`,
+
+    "",
+
+    formatTeamScore(
+      team1,
+      team1Innings
+    ),
+
+    "",
+
+    formatTeamScore(
+      team2,
+      team2Innings
+    ),
+
+    "",
+
+    match.status
+      ? `> ${match.status}`
+      : null,
+  ]
+    .filter((x) => x !== null)
+    .join("\n");
 
   const embed = new EmbedBuilder()
-    .setTitle(
-      `🏏 ${shorten(
-        match.name || "Live Cricket",
-        240
-      )}`
-    )
-
-    .setDescription(
+    .setTitle(`🏏 ${title}`)
+    .setDescription(description)
+    .setColor(
       stopped
-        ? "⚪ **Updates stopped**"
-        : `🔴 **LIVE**\n${
-            match.status ||
-            "Match in progress"
-          }`
-    )
+        ? 0x808080
+        : 0x2ecc71
+    );
 
-    .addFields({
-      name: "📊 SCORECARD",
-      value: formatInnings(match),
-      inline: false,
-    });
-
-  if (current) {
-    embed.addFields({
-      name: "🔥 Current Innings",
-      value:
-        `**${
-          current.inning ||
-          "Current innings"
-        }**\n` +
-        `### ${current.r ?? 0}/${
-          current.w ?? 0
-        }\n` +
-        `**${current.o ?? 0} overs**`,
-      inline: false,
-    });
-  }
-
-  if (match.matchType) {
-    embed.addFields({
-      name: "Format",
-      value:
-        String(
-          match.matchType
-        ).toUpperCase(),
-      inline: true,
-    });
-  }
-
+  // Venue
   if (match.venue) {
     embed.addFields({
-      name: "Venue",
-      value: shorten(
-        match.venue,
-        1024
-      ),
-      inline: true,
+      name: "🏟️ Venue",
+      value: match.venue,
+      inline: false,
+    });
+  }
+
+  // Current innings
+  if (current && !stopped) {
+    embed.addFields({
+      name: "⚡ Current",
+      value:
+        `**${current.inning || "Innings"}** • ` +
+        `${current.r ?? 0}/${current.w ?? 0} ` +
+        `(${current.o ?? 0})`,
+      inline: false,
     });
   }
 
   embed
     .setFooter({
       text: stopped
-        ? "Scoreboard stopped"
-        : "Over-by-over scoreboard • CricAPI",
+        ? "Live updates ended"
+        : "🔄 Updates every 2 minutes • CricAPI",
     })
     .setTimestamp();
 
