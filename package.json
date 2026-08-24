@@ -1,0 +1,16 @@
+{
+  "name": "cricket-live-score-discord-bot",
+  "version": "1.0.0",
+  "description": "Discord live cricket scoreboard bot using CricAPI",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "discord.js": "^14.25.1",
+    "dotenv": "^16.6.1"
+  }
+}
